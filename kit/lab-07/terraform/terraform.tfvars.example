@@ -1,0 +1,11 @@
+# Copier en terraform.tfvars (jamais versionné). Valeurs fictives.
+prefix               = "lagune01"
+location             = "francecentral"
+room_ip_cidr         = "203.0.113.10/32"
+juice_shop_tag       = "v20.3.0"
+enable_custom_domain = false
+custom_hostname      = "boutique.lagune.example"
+owner                = "equipe-lagune"
+expiration_date      = "2026-12-31"
+budget_amount        = 20
+budget_contact_email = "formateur@lagune.example"

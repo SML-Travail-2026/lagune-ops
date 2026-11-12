@@ -1,0 +1,6 @@
+# Stockage de l'état Terraform (créé une seule fois, voir README).
+# Copier en backend.hcl puis : terraform init -backend-config=backend.hcl
+resource_group_name  = "rg-lagune-tfstate"
+storage_account_name = "stlagunetfstate01"
+container_name       = "tfstate"
+key                  = "boutique.tfstate"

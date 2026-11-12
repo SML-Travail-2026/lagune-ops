@@ -1,0 +1,134 @@
+# Le même pipeline que .github/workflows/deploy.yml, version GitLab CI/CD.
+# Vérifier -> planifier -> appliquer (bouton manuel) -> ZAP -> détruire (bouton manuel).
+# Authentification Azure par jeton d'identité GitLab (OpenID Connect), sans secret stocké.
+#
+# Variables CI/CD à créer (Paramètres > CI/CD > Variables, non sensibles) :
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#   TFSTATE_RESOURCE_GROUP, TFSTATE_STORAGE_ACCOUNT, TF_VAR_room_ip_cidr, TF_VAR_prefix
+# Identité fédérée Entra : émetteur https://gitlab.com, audience api://AzureADTokenExchange,
+#   sujet project_path:<groupe>/lagune-ops:ref_type:branch:ref:main
+
+stages:
+  - verifier
+  - planifier
+  - appliquer
+  - tester
+  - detruire
+
+variables:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_ROOT: terraform
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: $AZURE_CLIENT_ID
+  ARM_TENANT_ID: $AZURE_TENANT_ID
+  ARM_SUBSCRIPTION_ID: $AZURE_SUBSCRIPTION_ID
+
+# Images épinglées sur une version précise (jamais « latest »).
+.terraform:
+  image:
+    name: hashicorp/terraform:1.17.1
+    entrypoint: [""]
+  before_script:
+    - cd "$TF_ROOT"
+
+.azure_oidc:
+  id_tokens:
+    AZURE_ID_TOKEN:
+      aud: api://AzureADTokenExchange
+
+.init_distant: &init_distant
+  # Le fournisseur azurerm lit le jeton OIDC dans ARM_OIDC_TOKEN.
+  - export ARM_OIDC_TOKEN="$AZURE_ID_TOKEN"
+  - >-
+    terraform init
+    -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP"
+    -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT"
+    -backend-config="container_name=tfstate"
+    -backend-config="key=boutique.tfstate"
+
+format-et-validation:
+  stage: verifier
+  extends: .terraform
+  script:
+    - terraform fmt -check -recursive
+    - terraform init -backend=false
+    - terraform validate
+
+trivy-iac:
+  stage: verifier
+  image:
+    name: aquasec/trivy:0.76.1
+    entrypoint: [""]
+  script:
+    - trivy config --severity HIGH,CRITICAL --exit-code 1 terraform
+
+plan:
+  stage: planifier
+  extends: [.terraform, .azure_oidc]
+  script:
+    - *init_distant
+    - terraform plan -out=tfplan
+  artifacts:
+    paths: [terraform/tfplan]
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+apply:
+  stage: appliquer
+  extends: [.terraform, .azure_oidc]
+  needs: [plan]
+  script:
+    - *init_distant
+    - terraform apply tfplan
+    - terraform output -raw boutique_url > ../boutique_url.txt
+  artifacts:
+    paths: [boutique_url.txt]
+    expire_in: 1 day
+  environment:
+    name: production
+  # Bouton « Exécuter » : l'humain décide. Les règles d'approbation des
+  # environnements protégés existent seulement en GitLab Premium et Ultimate.
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: false
+
+zap-baseline:
+  stage: tester
+  needs: [apply]
+  image:
+    name: ghcr.io/zaproxy/zaproxy:2.17.0
+    entrypoint: [""]
+  # Exécuteur auto-hébergé installé dans la salle : son adresse IP est celle
+  # autorisée par Terraform, aucune exception d'accès n'est nécessaire.
+  tags: [salle]
+  script:
+    - mkdir -p /zap/wrk
+    - zap-baseline.py -t "$(cat boutique_url.txt)" -r rapport-zap.html -I
+    - cp /zap/wrk/rapport-zap.html .
+  artifacts:
+    when: always
+    paths: [rapport-zap.html]
+    expire_in: 7 days
+  # Un échec du scan ne doit jamais empêcher la destruction.
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+destroy:
+  stage: detruire
+  extends: [.terraform, .azure_oidc]
+  # Disponible tout de suite, même si une étape précédente a échoué ou attend.
+  needs: []
+  script:
+    - *init_distant
+    - terraform destroy -auto-approve
+  environment:
+    name: production
+    action: stop
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: true

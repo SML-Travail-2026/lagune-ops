@@ -1,0 +1,52 @@
+# Une IA qui relit comme un collègue senior : Claude commente chaque demande de fusion
+# qui touche la liste des salariés ou les scripts. La décision de fusion reste humaine.
+name: Relecture par Claude
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths: ["data/**", "scripts/**"]
+
+permissions: {}
+
+jobs:
+  relire:
+    name: Relire la demande de fusion
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Tu relis, en français, une demande de fusion du dépôt lagune-ops
+            (entreprise fictive Lagune Services, Abidjan). La branche est déjà extraite.
+
+            Si data/salaries-lagune.csv change, vérifie :
+            - colonnes Prenom,Nom,UPN,Service,Poste,Ville ;
+            - chaque UPN se termine par @lagune.example, sans accent ni espace, sans doublon ;
+            - aucun mot de passe, aucun numéro personnel, aucune donnée réelle.
+
+            Si scripts/ change, vérifie :
+            - Microsoft Graph PowerShell uniquement (pas MSOnline ni AzureAD, retirés) ;
+            - permissions minimales (User.Create, User.ReadBasic.All, GroupMember.ReadWrite.All) ;
+            - essai à blanc par défaut, -WhatIf respecté, essai limité à 2 comptes possible ;
+            - aucun mot de passe affiché ni versionné.
+
+            Donne un avis clair : « à corriger » ou « bon pour un relecteur humain ».
+            Utilise `gh pr comment` pour l'avis général et
+            `mcp__github_inline_comment__create_inline_comment` (avec `confirmed: true`)
+            pour une ligne précise. Publie seulement des commentaires GitHub.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"

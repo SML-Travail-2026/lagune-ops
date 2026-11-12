@@ -1,0 +1,199 @@
+# Publier la boutique de Lagune Services.
+# Vérifier (fmt, validate, Trivy) -> planifier -> UNE approbation humaine -> appliquer + OWASP ZAP.
+# Actions épinglées par empreinte complète (SHA) : une étiquette peut être déplacée,
+# comme lors de la compromission de trivy-action en mars 2026.
+name: Déployer la boutique
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/deploy.yml"]
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/deploy.yml"]
+  workflow_dispatch:
+
+permissions: {}
+
+# Un seul déploiement ou destruction à la fois sur main ; les plans des demandes
+# de fusion ont leur propre file pour ne jamais bloquer la destruction du soir.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('lagune-pr-{0}', github.ref) || 'lagune-infra' }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VERSION: "1.17.1"
+
+defaults:
+  run:
+    working-directory: terraform
+
+jobs:
+  verifier:
+    name: Vérifier le code
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Format
+        run: terraform fmt -check -recursive
+
+      - name: Initialiser sans état distant
+        run: terraform init -backend=false
+
+      - name: Valider
+        run: terraform validate
+
+      - name: Analyser l'infrastructure (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: terraform
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  planifier:
+    name: Planifier
+    needs: verifier
+    runs-on: ubuntu-latest
+    # Environnement sans approbation. Ses secrets AZURE_* désignent une identité
+    # en LECTURE SEULE (une demande de fusion peut modifier ce fichier : elle ne
+    # doit jamais pouvoir déployer). Identité fédérée « environment:plan ».
+    environment: plan
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+      TF_VAR_room_ip_cidr: ${{ vars.ROOM_IP_CIDR }}
+      TF_VAR_prefix: ${{ vars.LAGUNE_PREFIX }}
+      TF_VAR_enable_custom_domain: ${{ vars.ENABLE_CUSTOM_DOMAIN || 'false' }}
+      TF_VAR_custom_hostname: ${{ vars.CUSTOM_HOSTNAME }}
+      TF_VAR_budget_contact_email: ${{ vars.BUDGET_CONTACT_EMAIL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Initialiser avec l'état distant
+        run: >-
+          terraform init
+          -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP"
+          -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT"
+          -backend-config="container_name=tfstate"
+          -backend-config="key=boutique.tfstate"
+
+      - name: Plan
+        run: terraform plan -out=tfplan
+
+      - name: Garder le plan pour l'étape d'approbation
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+  appliquer:
+    name: Appliquer puis tester (après approbation)
+    needs: planifier
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Relecteurs obligatoires + branche « main » seule sur l'environnement « production ».
+    # C'est la seule approbation humaine du pipeline.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+      TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: Initialiser avec l'état distant
+        run: >-
+          terraform init
+          -backend-config="resource_group_name=$TFSTATE_RESOURCE_GROUP"
+          -backend-config="storage_account_name=$TFSTATE_STORAGE_ACCOUNT"
+          -backend-config="container_name=tfstate"
+          -backend-config="key=boutique.tfstate"
+
+      - name: Appliquer exactement le plan approuvé
+        run: terraform apply tfplan
+
+      - name: Lire les sorties
+        run: |
+          {
+            echo "RESOURCE_GROUP=$(terraform output -raw resource_group_name)"
+            echo "WEB_APP=$(terraform output -raw web_app_name)"
+            echo "BOUTIQUE_URL=$(terraform output -raw boutique_url)"
+          } >> "$GITHUB_ENV"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # La boutique n'accepte que l'IP de la salle : on ouvre une exception
+      # temporaire pour ce seul exécuteur, retirée à la fin quoi qu'il arrive.
+      - name: Autoriser temporairement l'exécuteur
+        working-directory: .
+        run: |
+          RUNNER_IP="$(curl -fsS https://api.ipify.org)"
+          az webapp config access-restriction add \
+            --resource-group "$RESOURCE_GROUP" --name "$WEB_APP" \
+            --rule-name zap-runner --action Allow \
+            --ip-address "${RUNNER_IP}/32" --priority 200 --output none
+
+      - name: Scan de base OWASP ZAP (passif)
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: ${{ env.BOUTIQUE_URL }}
+          allow_issue_writing: false
+          fail_action: false
+          artifact_name: rapport-zap
+
+      - name: Retirer l'exception
+        if: always() && env.WEB_APP != ''
+        working-directory: .
+        run: |
+          az webapp config access-restriction remove \
+            --resource-group "$RESOURCE_GROUP" --name "$WEB_APP" \
+            --rule-name zap-runner --output none

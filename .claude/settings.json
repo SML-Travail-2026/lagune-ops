@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(terraform fmt *)",
+      "Bash(terraform validate *)",
+      "Bash(terraform plan *)",
+      "Bash(terraform output *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(az account show *)",
+      "Bash(az group list *)",
+      "Bash(az resource list *)",
+      "Bash(az webapp show *)"
+    ],
+    "ask": [
+      "Bash(terraform apply *)",
+      "Bash(git push *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
+      "Bash(pwsh *)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/*.tfvars)",
+      "Read(**/*.tfstate)",
+      "Read(**/*.tfstate.*)",
+      "Read(**/*.pem)",
+      "Read(**/*.pfx)",
+      "Read(~/.azure/**)",
+      "Read(~/lagune-mots-de-passe-*.csv)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/hooks/**)",
+      "Bash(rm *)",
+      "Bash(terraform destroy *)",
+      "Bash(terraform state rm *)",
+      "Bash(az group delete *)",
+      "Bash(az resource delete *)",
+      "Bash(git push --force *)",
+      "Bash(git reset --hard *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bloquer-suppressions.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Edit|Write|Grep|Glob|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/bloquer-secrets.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
